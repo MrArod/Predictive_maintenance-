@@ -3,94 +3,70 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.stats import zscore
 
-# --- --- --- Load Data Section --- --- --- #
-# Load in the sensor training data - FD001 
-train_file_path = "/workspaces/Predictive_maintenance-/train_FD001.txt"
+# --- Load Data Section --- #
+train_file_path = "train_FD001.txt"  # Update if needed
 
-# Read in the first training data set
-# Removing header to avoid first row of data as auto headder
-# Using the \\s+ delimiter to account for space " " typos 
-# Setting the engine parameter to python for the \s+ delimiter
-# Dropping any columns that empty
-temp_df = pd.read_csv(train_file_path, sep = "\s+", header = None, engine = "python").dropna(axis = 1, how = "all")
-num_columns = temp_df.shape[1]
+# Define column names (5 metadata + 21 sensors)
+column_names = ["unit_number", "time_in_cycles", "operational_setting_1", "operational_setting_2", "operational_setting_3"] + \
+               [f"sensor_{i}" for i in range(1, 22)]
 
-# Enter the first 5 columns 
-# Using a list comprehension for the sensor column names iterating over the f string for the range of columns
-# Using the range function to account for the non sensor columns in the dataset (first 5) and indexing from 1 to avoid "sensor 0"
-column_names = ["unit_number", "time_in_cycles", "operational_setting_1", "operational_setting_2", "operational_setting_3"]
-column_names += [f"sensor_{i}" for i in range(1, num_columns - 5 + 1)] # add 1 to account for the indexing starting at 1
+# Read dataset using the engine python to utilize the space delimiter \s+
+# The dataset has no header, so we use None to avoid using the first row as column names
+train_df = pd.read_csv(train_file_path, sep="\s+", header=None, names=column_names, engine="python")
 
-# reread in the training data with the new column names
-train_df = pd.read_csv(train_file_path, sep="\s+", header=None, names=column_names, engine="python").dropna(axis=1, how="all")
-
-# Conversion of "time_in_cycles" column to an int to avoid widening conversions
+# Convert time_in_cycles to integer to avoid widening conversion
 train_df["time_in_cycles"] = train_df["time_in_cycles"].astype(int)
 
-
-# --- --- --- Calculating Z Scores Section --- --- --- #
-# Using a list comprehension to iterate over the columns and find the sensor columns then assigning to "sensor_columns"
+# Select only sensor columns for z-score calculation
 sensor_columns = [col for col in train_df.columns if "sensor" in col]
 
-# Create a function to calculate the z-scores by taking in a dataframe and columns as the arguments
-def calculate_z_scores(df, columns):
-    return df[columns].apply(zscore)
+# --- Preform Z Scores calculation for Anomaly Flags --- #
+z_scores = train_df[sensor_columns].apply(zscore)
 
-# Function to calculate the z scores for the sensor columns and assign to "z_scores" variable
-# Note: the argument for the function is now specified as the sensor columns only not all columns
-z_scores = calculate_z_scores(train_df, sensor_columns)
+# Set the anomaly threshold low because of the low variability in the data
+threshold = 3
+# Function to flag anomalies based on z scores over a the threshold
+anomaly_flags = (z_scores.abs() > threshold)
 
-
-# --- --- --- Flagging Anomalies section --- --- --- #
-# Function to flag anomalies by taking in the z-scores and threshold as arguments
-threshold = 3  # Z score 
-def flag_anomalies(z_scores, threshold=3):
-    return (z_scores.abs() > threshold)
-
-# Call the flag anomalies function against the z scores and assign to "anomaly_flags" variable
-anomaly_flags = flag_anomalies(z_scores)
-# Iterate over the sensor columns and add the anomaly flags to the dataframe 
-# The applied anomalies function returns a boolean value which is then added to the dataframe as a new column
+# Utilize a list comprehension to iterate over the sensor columns
+# and add the anomaly flags to the df if anomaly is detected
+# The anomaly_flags defined earlier contains boolean values indicating anomalies
 train_df[[f"Anomaly_{col}" for col in sensor_columns]] = anomaly_flags
 
-
-# --- --- --- Save Flagged Data to CSV section --- --- --- #
-# Save the flagged data to a CSV file
+# Save flagged dataset
+# index set to False to avoid saving a line number column
 train_df.to_csv("flagged_FD001_data.csv", index=False)
 
+# --- Preforming Anomaly Statistics per Unit --- #
+# Count the number of cycles with anomalies per engine
+# Create a new df with the grouped unit number then sums across the columns boolean values from the anomaly flags df
+anomaly_counts_per_unit = anomaly_flags.groupby(train_df["unit_number"]).sum().sum(axis=1)
 
-# --- --- --- Display Sample Anomalies section --- --- --- #
-# Preview the first 10 rows of the anomalies
-# Using the "any" method to check if any of the columns have been added to anomaly flag
-anomalies = train_df[anomaly_flags.any(axis=1)]
-print("Sensor Anomalies in FD001:")
-print(anomalies[["time_in_cycles"] + sensor_columns[:3] + [f"Anomaly_{sensor_columns[0]}"]].head(10))
+# Get total cycles per engine
+total_cycles_per_unit = train_df.groupby("unit_number")["time_in_cycles"].max()
 
-# --- --- --- Scatter Plots for All Sensors section --- --- --- #
-available_units = train_df["unit_number"].unique()
-unit_id = available_units[0] if len(available_units) > 0 else None
+# Compute anomaly percentage per engine
+anomaly_percentage = (anomaly_counts_per_unit / total_cycles_per_unit) * 100
 
-if unit_id is not None:
-    unit_df = train_df[train_df["unit_number"] == unit_id].sort_values("time_in_cycles")
-    
-    if not unit_df.empty:
-        for sensor in sensor_columns:
-            plt.figure(figsize=(12, 6))
-            plt.scatter(unit_df["time_in_cycles"], unit_df[sensor], label="Sensor Data", color='blue', alpha=0.5)
-            anomaly_points = unit_df[unit_df[f"Anomaly_{sensor}"]]
-            plt.scatter(anomaly_points["time_in_cycles"], anomaly_points[sensor], color='red', label="Anomalies", marker='x', s=80)
-            
-            plt.xlabel("Time in Cycles")
-            plt.ylabel(sensor)
-            plt.title(f"Scatter Plot of Sensor Data - {sensor} (Anomalies Highlighted) for Engine Unit {unit_id}")
-            plt.legend()
-            
-            # Save the figure
-            plot_filename = f"sensor_{sensor}_anomalies_scatter.png"
-            plt.savefig(plot_filename)
-            plt.close()
-            print(f"Plot saved as {plot_filename}. You can open it to view the results.")
-    else:
-        print("No data available for the selected engine unit.")
-else:
-    print("No valid engine units found in the dataset.")
+# Sort for better visualization
+anomaly_percentage = anomaly_percentage.sort_values(ascending=False)
+
+# --- Bar Plot: Anomaly Percentage Per Engine --- #
+plt.figure(figsize=(12, 6))
+plt.bar(anomaly_percentage.index, anomaly_percentage, color='red')
+plt.xlabel("Engine Unit Number")
+plt.ylabel("Percentage of Cycles with Anomalies (%)")
+plt.title("Anomalies Present Per Engine Unit")
+plt.xticks(rotation=45)
+
+# Save the plot file
+plt.savefig("anomaly_percentage_per_unit.png")
+plt.show()
+
+# --- Print Summary for Presentation --- #
+print("Predictive Maintenance Summary")
+print(f"Total Engine Units Analyzed: {train_df['unit_number'].nunique()}")
+print(f"Total Sensor Columns: {len(sensor_columns)}")
+print(f"Z Score Threshold for Anomalies: {threshold}")
+print("Top 5 Engines with the Highest Anomaly Percentage:")
+print(anomaly_percentage.head(5))
